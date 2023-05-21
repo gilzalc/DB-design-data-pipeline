@@ -9,6 +9,9 @@ the corresponding CSV file into the table.
  Finally, the script runs a query from a SQL file on the populated database.
 """
 
+from airflow import DAG
+from airflow.operators.python_operator import PythonOperator
+from datetime import datetime
 from io import TextIOWrapper
 from zipfile import ZipFile
 import pandas as pd
@@ -19,30 +22,17 @@ COUNTRY_COLS = [0, 1, 2, 3]
 UNI_COLS = [1] + [i for i in range(4, 15)]
 YearData_COLS = [4, 15, 16]
 NUM_ROWS = 17
-# define tables and primary keys
-tables = {'Country': COUNTRY_COLS,
-          'University': UNI_COLS,
-          'YearData': YearData_COLS}
-primary_keys = {'Country': ['countrycode'], 'University': ['iau_id1'],
-                'YearData': ['iau_id1', 'year']}
-
-
-# return the list of all tables
-def get_names():
-    return ["Country", "University", "YearData"]
-
+tables = {'Country': COUNTRY_COLS, 'University': UNI_COLS, 'YearData': YearData_COLS}
+primary_keys = {'Country': ['countrycode'], 'University': ['iau_id1'], 'YearData': ['iau_id1', 'year']}
 
 def process_file():
     df = process_enrollment()
     # output the data to separate csv files for each table
     for table in tables:
         outfile = open(table + ".csv", 'w', encoding='UTF8')
-        relevant_rows = df.iloc[:, (tables[table])].drop_duplicates(
-            subset=primary_keys[table],
-            keep='last')
+        relevant_rows = df.iloc[:, (tables[table])].drop_duplicates(subset=primary_keys[table], keep='last')
         relevant_rows.to_csv(table + ".csv", index=False)
         outfile.close()
-
 
 def process_enrollment():
     outfile = open("enrollment.csv", 'w', encoding='UTF8')
@@ -56,27 +46,32 @@ def process_enrollment():
                 new_row = [row[i] for i in range(NUM_ROWS)]
                 outWriter.writerow(new_row)
             f.close()
-            df = pd.read_csv("enrollment.csv",
-                             dtype={'students5_estimated': 'Int64',
-                                    'divisions': 'Int64', 'yrclosed': 'Int64',
-                                    'foundedyr': 'Int64'},
-                             quoting=csv.QUOTE_MINIMAL)
+            df = pd.read_csv("enrollment.csv", dtype={'students5_estimated': 'Int64', 'divisions': 'Int64', 'yrclosed': 'Int64', 'foundedyr': 'Int64'}, quoting=csv.QUOTE_MINIMAL)
             df['orig_name'] = df['orig_name'].str.replace("'", "")
             return df
 
-
-def create_tables(con):
-    with con.cursor() as cur:
+def create_tables():
+    conn = psycopg2.connect(
+        host="localhost",
+        database="postgres",
+        user="gilzalc",
+        password="*********"
+    )
+    with conn.cursor() as cur:
         with open("create.sql", "r") as f:
             create_sql = f.read()
         cur.execute(create_sql)
-    con.commit()
+    conn.commit()
+    conn.close()
 
-
-def import_data(con):
-    # Open a cursor to perform database operations
-    cur = con.cursor()
-
+def import_data():
+    conn = psycopg2.connect(
+        host="localhost",
+        database="postgres",
+        user="gilzalc",
+        password="*********"
+    )
+    cur = conn.cursor()
     # Iterate through each table
     for table in get_names():
         # Open the CSV file for the table
@@ -97,21 +92,47 @@ def import_data(con):
                 cur.execute(sql, row)
 
     # Commit the changes
-    con.commit()
+    conn.commit()
+    conn.close()
 
-
-def exp_query(con):
-    with con.cursor() as cur:
+def exp_query():
+    conn = psycopg2.connect(
+        host="localhost",
+        database="postgres",
+        user="gilzalc",
+        password="*********"
+    )
+    with conn.cursor() as cur:
         with open("enrollment_query.sql", "r") as f:
             query = f.read()
         cur.execute(query)
-    con.commit()
-
-
-if __name__ == "__main__":
-    process_file()
-    conn = psycopg2.connect(host="localhost", database="postgres",
-                            user="gilzalc", password="*********")
-    create_tables(conn)
-    import_data(conn)
+    conn.commit()
     conn.close()
+
+default_args = {
+    'owner': 'airflow',
+    'start_date': datetime(2023, 5, 21),
+}
+
+with DAG('data_processing_dag', default_args=default_args, schedule_interval=None) as dag:
+    process_file_task = PythonOperator(
+        task_id='process_file',
+        python_callable=process_file,
+    )
+
+    create_tables_task = PythonOperator(
+        task_id='create_tables',
+        python_callable=create_tables,
+    )
+
+    import_data_task = PythonOperator(
+        task_id='import_data',
+        python_callable=import_data,
+    )
+
+    query_task = PythonOperator(
+        task_id='query',
+        python_callable=exp_query,
+    )
+
+    process_file_task >> create_tables_task >> import_data_task >> query_task
